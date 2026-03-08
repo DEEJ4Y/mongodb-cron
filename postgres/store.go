@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	scheduler "github.com/DEEJ4Y/mongodb-cron"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// validIdentifier matches safe SQL identifiers (letters, digits, underscores).
+var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // Config holds the configuration for the PostgreSQL job store.
 type Config struct {
@@ -20,12 +24,13 @@ type Config struct {
 	TableName string
 
 	// Condition is an optional extra WHERE clause fragment appended with AND.
-	// Example: "data->>'type' = 'email'"
+	// Placeholders must start at $2, since $1 is reserved for internal use
+	// by LockNext (the lockUntil parameter).
+	// Example: "data->>'type' = $2"
 	Condition string
 
-	// ConditionArgs are the positional arguments for Condition.
-	// Parameter numbering in Condition should use $1, $2, etc.
-	// They will be renumbered automatically when appended to the query.
+	// ConditionArgs are the positional arguments for Condition placeholders
+	// starting at $2.
 	ConditionArgs []interface{}
 }
 
@@ -47,9 +52,16 @@ func NewStore(config Config) (*Store, error) {
 		config.TableName = "jobs"
 	}
 
+	if !validIdentifier.MatchString(config.TableName) {
+		return nil, fmt.Errorf("invalid table name %q: must match %s", config.TableName, validIdentifier.String())
+	}
+
+	// Quote the identifier to safely handle reserved words and mixed case.
+	quotedTable := pgx.Identifier{config.TableName}.Sanitize()
+
 	return &Store{
 		pool:          config.Pool,
-		tableName:     config.TableName,
+		tableName:     quotedTable,
 		condition:     config.Condition,
 		conditionArgs: config.ConditionArgs,
 	}, nil
@@ -59,10 +71,10 @@ func NewStore(config Config) (*Store, error) {
 // It uses a CTE with FOR UPDATE SKIP LOCKED to prevent race conditions.
 func (s *Store) LockNext(ctx context.Context, lockUntil time.Time) (*scheduler.Job, error) {
 	// Build the query with optional condition.
-	// The lockUntil value is always $1. Condition args start at $2.
+	// The lockUntil value is always $1. Condition placeholders start at $2.
 	conditionClause := ""
 	if s.condition != "" {
-		conditionClause = fmt.Sprintf("AND %s", s.renumberCondition(2))
+		conditionClause = fmt.Sprintf("AND %s", s.condition)
 	}
 
 	query := fmt.Sprintf(`
@@ -179,56 +191,3 @@ func (s *Store) Remove(ctx context.Context, jobID interface{}) error {
 	return nil
 }
 
-// renumberCondition shifts parameter numbers in the condition string.
-// If the condition uses $1, $2, etc., they get shifted by the given offset.
-// For example, with startAt=2, $1 becomes $2, $2 becomes $3, etc.
-func (s *Store) renumberCondition(startAt int) string {
-	if len(s.conditionArgs) == 0 {
-		return s.condition
-	}
-
-	result := []byte(s.condition)
-	// Replace $N with $(N+startAt-1), processing from highest to lowest
-	// to avoid $1 being replaced before $10.
-	for i := len(s.conditionArgs); i >= 1; i-- {
-		old := fmt.Sprintf("$%d", i)
-		new := fmt.Sprintf("$%d", i+startAt-1)
-		result = replaceAll(result, old, new)
-	}
-	return string(result)
-}
-
-// replaceAll replaces all occurrences of old with new in b.
-func replaceAll(b []byte, old, new string) []byte {
-	oldBytes := []byte(old)
-	newBytes := []byte(new)
-	var out []byte
-	for len(b) > 0 {
-		idx := indexOf(b, oldBytes)
-		if idx < 0 {
-			out = append(out, b...)
-			break
-		}
-		out = append(out, b[:idx]...)
-		out = append(out, newBytes...)
-		b = b[idx+len(oldBytes):]
-	}
-	return out
-}
-
-// indexOf returns the index of needle in haystack, or -1 if not found.
-func indexOf(haystack, needle []byte) int {
-	for i := 0; i <= len(haystack)-len(needle); i++ {
-		match := true
-		for j := 0; j < len(needle); j++ {
-			if haystack[i+j] != needle[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
-}

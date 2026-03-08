@@ -513,6 +513,7 @@ The scheduler has been extensively tested for distributed locking correctness an
 | In-Memory (Go) | 50 | 5,000 | 1.1s | 4,539 jobs/sec | 0 ✅ | 0 ✅ |
 | Stress Test (Go) | 100 | 10,000 | 2.2s | 4,519 jobs/sec | 0 ✅ | 0 ✅ |
 | **MongoDB (Go)** | **100** | **10,000** | **2.1s** | **4,757 jobs/sec** | **0 ✅** | **0 ✅** |
+| **PostgreSQL (Go)** | **100** | **10,000** | **8.2s** | **1,224 jobs/sec** | **0 ✅** | **0 ✅** |
 | **MongoDB (Node.js)** | **100** | **10,000** | **4.0s** | **2,492 jobs/sec** | **0 ✅** | **0 ✅** |
 
 ### Go vs Node.js Performance Comparison
@@ -530,10 +531,10 @@ Direct comparison with identical test parameters (100 workers, 10,000 jobs, Mong
 
 ### Key Validation Points
 
-✅ **Zero Duplicate Executions**: Across 25,000+ total job executions, not a single duplicate was found
+✅ **Zero Duplicate Executions**: Across 35,000+ total job executions, not a single duplicate was found
 ✅ **Zero Missed Jobs**: Every queued job was processed exactly once
-✅ **Production MongoDB**: Real database with 100 concurrent workers proves distributed safety
-✅ **High Throughput**: 4,500+ jobs/second with sub-millisecond latency
+✅ **Production Databases**: Real MongoDB and PostgreSQL with 100 concurrent workers proves distributed safety
+✅ **High Throughput**: 1,200-4,700 jobs/second depending on database backend
 ✅ **Race Condition Testing**: All schedulers started simultaneously to maximize contention
 
 ### What Was Tested
@@ -543,11 +544,12 @@ The concurrency tests validate the distributed locking mechanism under worst-cas
 - **100 concurrent scheduler instances** competing for the same jobs
 - **Simultaneous start** of all schedulers to maximize race conditions
 - **Fast polling** (2-10ms intervals) to create maximum lock contention
-- **Atomic operations** using MongoDB's `findOneAndUpdate`
+- **Atomic operations** using MongoDB's `findOneAndUpdate` and PostgreSQL's `UPDATE ... RETURNING`
 - **Crash recovery** scenarios with lock expiration
 
 ### Performance Characteristics
 
+**MongoDB:**
 ```
 MongoDB Distributed Test Results:
   Total jobs queued:        10,000
@@ -563,6 +565,25 @@ Performance Metrics:
   Avg time per job:         210.195µs
   Throughput per scheduler: 47.57 jobs/sec
 ```
+
+**PostgreSQL:**
+```
+PostgreSQL Distributed Test Results:
+  Total jobs queued:        10,000
+  Total executions:         10,000
+  Unique jobs executed:     10,000
+  Jobs with duplicates:     0
+  Total duplicate runs:     0
+  Jobs not executed:        0
+  Errors encountered:       0
+
+Performance Metrics:
+  Jobs per second:          1,223.84
+  Avg time per job:         817.102µs
+  Throughput per scheduler: 12.24 jobs/sec
+```
+
+> **Note:** PostgreSQL throughput is lower due to its stronger transactional guarantees and row-level locking semantics. Both databases achieve **zero duplicate executions**, proving the distributed locking mechanism works correctly regardless of backend.
 
 This proves the scheduler is **production-ready** for:
 - ✅ Distributed deployments with multiple workers

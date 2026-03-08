@@ -29,6 +29,11 @@ For MongoDB support:
 go get github.com/DEEJ4Y/mongodb-cron/mongodb
 ```
 
+For PostgreSQL support:
+```bash
+go get github.com/DEEJ4Y/mongodb-cron/postgres
+```
+
 ## Quick Start
 
 ### Basic Example (In-Memory)
@@ -142,6 +147,81 @@ func main() {
 }
 ```
 
+### PostgreSQL Example
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "time"
+
+    "github.com/DEEJ4Y/mongodb-cron"
+    "github.com/DEEJ4Y/mongodb-cron/postgres"
+    "github.com/jackc/pgx/v5/pgxpool"
+)
+
+func main() {
+    ctx := context.Background()
+
+    // Connect to PostgreSQL
+    pool, err := pgxpool.New(ctx, "postgres://localhost:5432/myapp?sslmode=disable")
+    if err != nil {
+        panic(err)
+    }
+    defer pool.Close()
+
+    // Create table (run once)
+    pool.Exec(ctx, `
+        CREATE TABLE IF NOT EXISTS jobs (
+            id BIGSERIAL PRIMARY KEY,
+            sleep_until TIMESTAMPTZ,
+            interval TEXT NOT NULL DEFAULT '',
+            repeat_until TIMESTAMPTZ,
+            auto_remove BOOLEAN NOT NULL DEFAULT FALSE,
+            data JSONB DEFAULT '{}'
+        )`)
+
+    // Create PostgreSQL store
+    store, err := postgres.NewStore(postgres.Config{
+        Pool: pool,
+    })
+    if err != nil {
+        panic(err)
+    }
+
+    // Create scheduler
+    sched, err := scheduler.New(scheduler.Config{
+        Store: store,
+        OnDocument: func(ctx context.Context, job *scheduler.Job) error {
+            fmt.Printf("Processing: %v\n", job.Data["name"])
+            return nil
+        },
+        OnError: func(ctx context.Context, err error) {
+            fmt.Printf("Error: %v\n", err)
+        },
+        NextDelay:    1 * time.Second,
+        IdleDelay:    10 * time.Second,
+        LockDuration: 10 * time.Minute,
+    })
+    if err != nil {
+        panic(err)
+    }
+
+    // Start scheduler
+    sched.Start(ctx)
+    defer sched.Stop(context.Background())
+
+    // Create jobs
+    now := time.Now()
+    pool.Exec(ctx,
+        "INSERT INTO jobs (sleep_until, data) VALUES ($1, $2)",
+        now, `{"name": "My Job", "payload": "custom data"}`,
+    )
+}
+```
+
 ## Job Types
 
 ### One-Time Job
@@ -250,6 +330,17 @@ type Config struct {
 }
 ```
 
+### PostgreSQL Config
+
+```go
+type Config struct {
+    Pool      *pgxpool.Pool   // Required
+    TableName string          // default: "jobs"
+    Condition string          // Optional WHERE clause, e.g. "data->>'type' = 'email'"
+    ConditionArgs []interface{} // Args for condition placeholders
+}
+```
+
 ## Architecture
 
 ### Core Components
@@ -266,7 +357,8 @@ type Config struct {
 
 3. **Database Implementations**:
    - MongoDB (included)
-   - PostgreSQL, Redis, etc. (can be implemented by users)
+   - PostgreSQL (included)
+   - Redis, etc. (can be implemented by users)
 
 ### How It Works
 
@@ -306,6 +398,14 @@ Key requirements:
 - Handle `nil` values correctly for `sleepUntil`
 
 ## Performance
+
+### PostgreSQL Indexes
+
+For better performance with PostgreSQL, create a partial index on `sleep_until`:
+
+```sql
+CREATE INDEX idx_jobs_sleep_until ON jobs (sleep_until) WHERE sleep_until IS NOT NULL;
+```
 
 ### MongoDB Indexes
 
@@ -368,6 +468,7 @@ Adjust the index if using custom field paths or conditions.
 See the `examples/` directory:
 - `examples/basic/`: In-memory implementation for testing
 - `examples/mongodb/`: Production-ready MongoDB example
+- `examples/postgres/`: Production-ready PostgreSQL example
 
 ## Testing
 
@@ -394,6 +495,9 @@ go test -v -run TestConcurrentSchedulersLarge .
 
 # MongoDB test (requires MongoDB running)
 go test -v -run TestDistributedLocking ./mongodb/
+
+# PostgreSQL test (requires PostgreSQL running)
+go test -v -run TestDistributedLocking ./postgres/
 ```
 
 ## Concurrency Testing & Performance
